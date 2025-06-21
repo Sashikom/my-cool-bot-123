@@ -1,7 +1,7 @@
-aiogram==2.25.1
+aiogram>=3.6.0
+
 python-dotenv
 gspread
 oauth2client
-aiohttp>=3.9.0
 
 
