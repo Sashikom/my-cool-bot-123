@@ -2,5 +2,6 @@ aiogram==2.25.1
 python-dotenv
 gspread
 oauth2client
-aiohttp==3.8.5
+aiohttp>=3.9.0
+
 
