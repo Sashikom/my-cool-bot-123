@@ -1,3 +1,4 @@
 #!/bin/bash
 echo "Bot starting..."
-python -m bot.main
+cd bot
+python3 main.py

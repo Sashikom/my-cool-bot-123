@@ -1,27 +1,47 @@
-# bot/main.py
-import datetime
-import logging
 import os
-import asyncio
+import sys
+import logging
+import datetime
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, Message
+from aiogram.filters import CommandStart
+
 from dotenv import load_dotenv
-from sheets import get_sheet  # обновлённая версия sheets.py
 
+# Добавляем путь, чтобы импорты работали
+sys.path.append(os.path.dirname(__file__))
+
+# ——— Загрузка переменных окружения ———
 load_dotenv()
+
 API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID"))
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+
+if not API_TOKEN or not ADMIN_CHAT_ID:
+    raise RuntimeError("Не заданы BOT_TOKEN или ADMIN_CHAT_ID в .env файле")
+
+try:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+except ValueError:
+    raise RuntimeError("ADMIN_CHAT_ID должен быть числом")
 
 # ——— Логирование ———
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
-# ——— Инициализация бота ———
+# ——— Инициализация ———
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage())
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
 
 # ——— FSM: заказ услуги ———
 class OrderForm(StatesGroup):
@@ -29,69 +49,117 @@ class OrderForm(StatesGroup):
     niche = State()
     task = State()
 
-# ——— Клавиатура ———
-menu = ReplyKeyboardMarkup(resize_keyboard=True)
-menu.add(KeyboardButton("📋 Услуги"), KeyboardButton("💼 Примеры работ"))
-menu.add(KeyboardButton("💬 Заказать"))
 
-# ——— Старт ———
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    await message.answer("Привет, Александр! Бот запущен и готов к работе ✅", reply_markup=menu)
+# ——— Клавиатура ———
+def get_main_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Услуги"), KeyboardButton(text="💼 Примеры работ")],
+            [KeyboardButton(text="💬 Заказать")]
+        ],
+        resize_keyboard=True
+    )
+
+
+# ——— Пример функции get_sheet() ———
+def get_sheet():
+    """
+    Здесь должна быть ваша функция подключения к Google Sheets.
+    Для примера возвращается объект с методом append_row.
+    """
+    class DummySheet:
+        def append_row(self, row):
+            logger.info(f"Данные добавлены в таблицу: {row}")
+    return DummySheet()
+    # Замените на вашу реальную реализацию!
+
+
+# ——— Хендлер /start ———
+@dp.message(lambda msg: msg.text == "/start")
+async def start(message: Message):
+    await message.answer(
+        "Привет! Бот запущен и готов к работе ✅",
+        reply_markup=get_main_menu()
+    )
+
 
 # ——— FSM: Заказ ———
-@dp.message_handler(lambda msg: msg.text == "💬 Заказать")
-async def start_order(message: types.Message):
-    await OrderForm.name.set()
+@dp.message(lambda msg: msg.text == "💬 Заказать")
+async def start_order(message: Message, state: FSMContext):
+    await state.set_state(OrderForm.name)
     await message.answer("Как тебя зовут?")
 
-@dp.message_handler(state=OrderForm.name)
-async def process_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await OrderForm.next()
+
+@dp.message(OrderForm.name)
+async def process_name(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text:
+        await message.answer("Пожалуйста, введите имя.")
+        return
+    await state.update_data(name=text)
+    await state.set_state(OrderForm.niche)
     await message.answer("Из какой ты ниши?")
 
-@dp.message_handler(state=OrderForm.niche)
-async def process_niche(message: types.Message, state: FSMContext):
-    await state.update_data(niche=message.text)
-    await OrderForm.next()
-    await message.answer("Опиши задачу, с которой тебе нужна помощь")
 
-@dp.message_handler(state=OrderForm.task)
-async def process_task(message: types.Message, state: FSMContext):
+@dp.message(OrderForm.niche)
+async def process_niche(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text:
+        await message.answer("Пожалуйста, укажите нишу.")
+        return
+    await state.update_data(niche=text)
+    await state.set_state(OrderForm.task)
+    await message.answer("Опиши задачу, с которой тебе нужна помощь.")
+
+
+@dp.message(OrderForm.task)
+async def process_task(message: Message, state: FSMContext):
     data = await state.get_data()
-    name = data['name']
-    niche = data['niche']
-    task = message.text
+    name = data.get('name', '—')
+    niche = data.get('niche', '—')
+    task = message.text.strip()
+    if not task:
+        await message.answer("Пожалуйста, опишите задачу.")
+        return
+
     user_id = message.from_user.id
     username = message.from_user.username or "—"
     date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     try:
-        get_sheet().append_row([date, name, niche, task, user_id, username])
-        logging.info(f"✅ Заявка сохранена для @{username}")
+        sheet = get_sheet()
+        if sheet:
+            sheet.append_row([date, name, niche, task, user_id, username])
+            logger.info(f"✅ Заявка сохранена для @{username}")
+        else:
+            raise Exception("Не удалось инициализировать Google Sheet")
     except Exception as e:
-        logging.error(f"❌ Ошибка записи в таблицу: {e}")
+        logger.error(f"❌ Ошибка записи в таблицу: {e}")
         await message.answer("⚠️ Не удалось сохранить заявку. Попробуй позже.")
         await bot.send_message(ADMIN_CHAT_ID, f"❌ Ошибка записи в Google Таблицу:\n{e}")
-        await state.finish()
+        await state.clear()
         return
 
     await bot.send_message(
         ADMIN_CHAT_ID,
-        f"📩 Новая заявка!\n\n👤 Имя: {name}\n📌 Ниша: {niche}\n📝 Задача: {task}\n"
-        f"🆔 ID: {user_id}\n👤 @{username}\n📅 {date}"
+        f"📩 Новая заявка!\n\n"
+        f"👤 Имя: {name}\n"
+        f"📌 Ниша: {niche}\n"
+        f"📝 Задача: {task}\n"
+        f"🆔 ID: {user_id}\n"
+        f"👤 @{username}\n"
+        f"📅 {date}"
     )
 
     await message.answer("Спасибо, заявка принята ✅\nЯ свяжусь с тобой в ближайшее время.")
-    await state.finish()
+    await state.clear()
 
-# ——— Хендлер: Примеры работ ———
-@dp.message_handler(lambda msg: msg.text == "💼 Примеры работ")
-async def show_portfolio(message: types.Message):
+
+# ——— Примеры работ ———
+@dp.message(lambda msg: msg.text == "💼 Примеры работ")
+async def show_portfolio(message: Message):
     await message.answer(
         "💼 Примеры работ:\n\n"
-        "📄 [Смотреть портфолио](https://docs.google.com/document/d/1m0ydVEODPfvMTqCXtWvBSlp_jXZNX600xf3IgApGPVk)\n\n"
+        "📄 [Смотреть портфолио](https://docs.google.com/document/d/1m0ydVEODPfvMTqCXtWvBSlp_jXZNX600xf3IgApGPVk)\n\n" 
         "📦 Карточка товара:\n"
         "«Это не просто куртка — это броня на зиму»\n\n"
         "👟 Описание кроссовок:\n"
@@ -99,9 +167,10 @@ async def show_portfolio(message: types.Message):
         parse_mode="Markdown"
     )
 
-# ——— Хендлер: Услуги ———
-@dp.message_handler(lambda msg: msg.text == "📋 Услуги")
-async def show_services(message: types.Message):
+
+# ——— Услуги ———
+@dp.message(lambda msg: msg.text == "📋 Услуги")
+async def show_services(message: Message):
     await message.answer(
         "📋 Услуги:\n\n"
         "✍ Помогаю словами решать задачи:\n"
@@ -115,10 +184,9 @@ async def show_services(message: types.Message):
         parse_mode="Markdown"
     )
 
-# ——— Запуск ———
-if __name__ == "__main__":
-    async def main():
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling()
 
-    asyncio.run(main())
+# ——— Точка входа для Vercel ———
+async def main(event, context):
+    update = Update.model_validate_json(event["body"], context={"bot": bot})
+    await dp.propagate_event(bot=bot, update=update)
+    return {"statusCode": 200, "body": "OK"}
